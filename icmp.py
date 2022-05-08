@@ -19,14 +19,14 @@ class icmp_session:
     self.data = ''.join(random.choices(string.ascii_letters, k=10))
 
     # Create raw socket
-    self.socket = socket.socket(socket.AF_INET,socket.SOCK_RAW,scoket.IPPROTO_RAW)
+    self.socket = socket.socket(socket.AF_INET,socket.SOCK_RAW, socket.IPPROTO_RAW)
     # Set option to indicate that IP header is included
     self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
 
   def create_echo(self):
     code = 0
     checksum = 0
-    format_str = '!2b3h10s'
+    format_str = '!2B3H10s'
     icmp_size = struct.calcsize(format_str)
     icmp_packet = struct.pack(format_str, self.icmp_type, code, checksum, self.identifier, self.sequence,
         self.data.encode('ascii'))
@@ -50,9 +50,9 @@ class icmp_session:
     protocol = 1
     source = functools.reduce(lambda a,b: (a << 8) + b, [int(x) for x in self.source.split('.')])
     destination = functools.reduce(lambda a,b: (a << 8) + b, [int(x) for x in self.destination.split('.')])
-    format_str = '!2b3h2bh2i'
+    format_str = '!2B3H2BH2I'
     ip_header = struct.pack(format_str, (version << 4) | length, (dscp << 2) | ecn, total_length,
-        identification, (flags << 17) | offset, ttl, protocol, checksum, source, destination)
+        identification, (flags << 13) | offset, ttl, protocol, checksum, source, destination)
     checksum = self.compute_checksum(ip_header)
     hex_checksum = hex(checksum)[2:]
     hex_header = ip_header.hex()
