@@ -4,52 +4,35 @@ import struct
 import socket
 import functools
 import sys
+from abc import ABC, abstractmethod
 
 BIG_ENDIAN = 0
 LITTLE_ENDIAN = 1
 
-class icmp_session:
+class ICMP(ABC):
   identifier = 0
-  def __init__(self, destination='127.0.0.1', source='127.0.0.1'):
+  def __init__(self, destination, source):
     self.destination = destination
     self.source = source
-    self.icmp_type = 8
     self.sequence = 0
-    self.identifier = icmp_session.identifier
-    self.data_length = 10
-    icmp_session.identifier += 1
-    self.data = ''.join(random.choices(string.ascii_letters, k=self.data_length))
+    self.identifier = ICMP.identifier
+    ICMP.identifier += 1
     self.clear_response_data()
+    self.ip_header_format = '2B3H2BH2I'
+    self.ip_header_length = 20
 
     # Create raw socket
     self.socket = socket.socket(socket.AF_INET,socket.SOCK_RAW, socket.IPPROTO_ICMP)
     # Set option to indicate that IP header is included
     self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
 
-  def create_echo(self):
-    """Create ICMP Echo request"""
-    code = 0
-    checksum = 0
-    format_str = '2B3H{}s'.format(self.data_length)
-    icmp_size = struct.calcsize(format_str)
-    # Use big endian for packing
-    icmp_packet = struct.pack('>' + format_str, self.icmp_type, code, checksum, self.identifier, self.sequence,
-        self.data.encode('ascii'))
-    checksum = self.compute_checksum(icmp_packet)
-    # Repack package after checksum is known but in network byte order
-    icmp_packet = struct.pack('!' + format_str, self.icmp_type, code, checksum, self.identifier, self.sequence,
-        self.data.encode('ascii'))
-    self.sequence += 1
-    self.package = self.add_ip_headers(icmp_packet, icmp_size)
-    self.to_be_sent = len(self.package)
-    
-  def add_ip_headers(self, icmp_packet, icmp_length):
+  def add_ip_headers(self, message):
     """Add IP Headers to a package"""
     version = 4
     length = 5
     dscp = 0
     ecn = 0
-    total_length = icmp_length + length
+    total_length = len(message) + length
     identification = 0
     flags = 0
     offset = 0
@@ -63,13 +46,12 @@ class icmp_session:
     version_and_length = (version << 4) | length
     dscp_and_ecn = (dscp << 2) | ecn
     flags_and_offset = (flags << 13) | offset
-    format_str = '2B3H2BH2I'
-    ip_header = struct.pack('>' + format_str, version_and_length, dscp_and_ecn, total_length,
+    ip_header = struct.pack('>' + self.ip_header_format, version_and_length, dscp_and_ecn, total_length,
         identification, flags_and_offset, ttl, protocol, checksum, source, destination)
     checksum = self.compute_checksum(ip_header)
-    ip_header = struct.pack('!' + format_str, version_and_length, dscp_and_ecn, total_length,
+    ip_header = struct.pack('!' + self.ip_header_format, version_and_length, dscp_and_ecn, total_length,
         identification, flags_and_offset, ttl, protocol, checksum, source, destination)
-    return ip_header + icmp_packet
+    return ip_header + message
 
   def compute_checksum(self, seq, endianess=BIG_ENDIAN):
     """Compute chesksum as 16-bit one's complement"""
@@ -109,7 +91,7 @@ class icmp_session:
 
   def send_package(self):
     """Send next ICMP package"""
-    self.create_echo()
+    self.create_package()
     if self.to_be_sent:
       sent = self.socket.sendto(self.package,(self.destination, 0))
       self.to_be_sent -= sent
@@ -117,7 +99,7 @@ class icmp_session:
     else:
       # If whole request is sent than clear previous response
       self.clear_response_data()
-    return self.recieve_response()
+    self.recieve_response()
 
   def recieve_response(self):
     """Receive ICMP package"""
@@ -129,16 +111,11 @@ class icmp_session:
         total_length_raw = self.response[2:4]
         self.response_length = struct.unpack("!H", total_length_raw)[0]
       if self.response_length == self.recieved:
-        self.parse_response()
+        self.parse_response(self.response)
 
-  def parse_response(self):
-    """Parse response and construct dictionary with values from response"""
-    ip_header_raw = self.response[:20]
-    icmp_packet_raw = self.response[20:]
-    ip_header_format = '2B3H2BH2I'
-    icmp_packet_format = '2B3H{}s'.format(self.data_length)
-    ip_header = struct.unpack('!' + ip_header_format, ip_header_raw)
-    icmp_packet = struct.unpack('!' + icmp_packet_format, icmp_packet_raw)
+  def parse_IP_header(self, message):
+    ip_header_raw = message[:self.ip_header_length]
+    ip_header = struct.unpack('!' + self.ip_header_format, ip_header_raw)
     ip = {
         'Version': (ip_header[0] >> 4) & 0x0f,
         'IHL': ip_header[0] & 0x0f,
@@ -155,16 +132,7 @@ class icmp_session:
         'Source': socket.inet_ntoa(ip_header[8].to_bytes(4, byteorder='big')),
         'Destination': socket.inet_ntoa(ip_header[9].to_bytes(4, byteorder='big'))
         }
-    icmp = {
-        'Type': icmp_packet[0],
-        'Code': icmp_packet[1],
-        'Checksum': icmp_packet[2],
-        'Identifier': icmp_packet[3],
-        'Sequence': icmp_packet[4],
-        'Data': icmp_packet[5]
-        }
-    self.parsed_response = {'ip': ip, 'icmp': icmp}
-    self.response_ready = True
+    return ip
 
   def get_response(self):
     """Getter for response"""
@@ -173,3 +141,50 @@ class icmp_session:
   def process_event():
     """Event handler for select events"""
     pass
+
+  @abstractmethod
+  def parse_response(self, response):
+    pass
+
+  @abstractmethod
+  def create_package(self):
+    pass
+
+class ICMP_Echo(ICMP):
+  def __init__(self, destination, source):
+    super().__init__(destination,source)
+    self.icmp_type = 8
+    self.data_length = 10
+    self.data = ''.join(random.choices(string.ascii_letters, k=self.data_length))
+    self.icmp_format = '2B3H{}s'.format(self.data_length)
+    
+  def create_package(self):
+    """Create ICMP Echo request"""
+    code = 0
+    checksum = 0
+    # Use big endian for packing
+    icmp_packet = struct.pack('>' + self.icmp_format, self.icmp_type, code, checksum, self.identifier, self.sequence,
+        self.data.encode('ascii'))
+    checksum = self.compute_checksum(icmp_packet)
+    # Repack package after checksum is known but in network byte order
+    icmp_packet = struct.pack('!' + self.icmp_format, self.icmp_type, code, checksum, self.identifier, self.sequence,
+        self.data.encode('ascii'))
+    self.sequence += 1
+    self.package = self.add_ip_headers(icmp_packet)
+    self.to_be_sent = len(self.package)
+
+  def parse_response(self, response):
+    """Parse response and construct dictionary with values from response"""
+    icmp_packet_raw = response[self.ip_header_length:]
+    icmp_packet = struct.unpack('!' + self.icmp_format, icmp_packet_raw)
+    icmp = {
+        'Type': icmp_packet[0],
+        'Code': icmp_packet[1],
+        'Checksum': icmp_packet[2],
+        'Identifier': icmp_packet[3],
+        'Sequence': icmp_packet[4],
+        'Data': icmp_packet[5]
+        }
+    self.parsed_response = {'ip': self.parse_IP_header(response), 'icmp': icmp}
+    self.response_ready = True
+
