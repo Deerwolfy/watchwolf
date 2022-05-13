@@ -157,7 +157,7 @@ class ICMP_Echo(ICMP):
     self.data_length = 10
     self.data = ''.join(random.choices(string.ascii_letters, k=self.data_length))
     self.icmp_format = '2B3H{}s'.format(self.data_length)
-    
+
   def create_package(self):
     """Create ICMP Echo request"""
     code = 0
@@ -183,7 +183,7 @@ class ICMP_Echo(ICMP):
         'Checksum': icmp_packet[2],
         'Identifier': icmp_packet[3],
         'Sequence': icmp_packet[4],
-        'Data': icmp_packet[5]
+        'Data': icmp_packet[5].decode('ascii')
         }
     self.parsed_response = {'ip': self.parse_IP_header(response), 'icmp': icmp}
     self.response_ready = True
