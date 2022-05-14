@@ -118,15 +118,14 @@ class ICMP(ABC):
       response, address = self.socket.recvfrom(256)
     except OSError:
       print('Error while recieving icmp response')
-    if address[0] == self.destination:
-      self.request_timer.stop()
-      self.recieved += len(response)
-      self.response += response
-      if self.recieved >= 4 and not self.response_length:
-        total_length_raw = self.response[2:4]
-        self.response_length = struct.unpack("!H", total_length_raw)[0]
-      if self.response_length == self.recieved:
-        self.parse_response(self.response)
+    self.request_timer.stop()
+    self.recieved += len(response)
+    self.response += response
+    if self.recieved >= 4 and not self.response_length:
+      total_length_raw = self.response[2:4]
+      self.response_length = struct.unpack("!H", total_length_raw)[0]
+    if self.response_length == self.recieved:
+      self.parse_response(self.response)
 
   def parse_IP_header(self, message):
     ip_header_raw = message[:ICMP.ip_header_length]
