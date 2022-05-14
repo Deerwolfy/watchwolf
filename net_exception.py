@@ -1,0 +1,2 @@
+class NetTimeoutException(Exception):
+  pass
