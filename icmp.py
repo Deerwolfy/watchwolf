@@ -4,10 +4,12 @@ import struct
 import socket
 import functools
 import sys
-from abc import ABC, abstractmethod
-import timer
-import net_exception
 import datetime
+from abc import ABC, abstractmethod
+
+import net_exception
+import timer
+import ip
 from icmp_type import icmp_types
 
 BIG_ENDIAN = 0
@@ -19,6 +21,10 @@ class ICMP(ABC):
   ip_header_length = 20
   sec_before_timeout = 5
   def __init__(self, destination, source):
+    if not ip.check(destination):
+      raise ValueError("Wrong destination ip format")
+    if not ip.check(source):
+      raise ValueError("Wrong source ip format")
     self.destination = destination
     self.source = source
     self.sequence = 0
@@ -31,6 +37,7 @@ class ICMP(ABC):
     self.socket = socket.socket(socket.AF_INET,socket.SOCK_RAW, socket.IPPROTO_ICMP)
     # Set option to indicate that IP header is included
     self.socket.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+    self.socket.setblocking(False)
 
 
   def add_ip_headers(self, message):
@@ -106,68 +113,92 @@ class ICMP(ABC):
         self.to_be_sent -= sent
         self.package = self.package[sent:]
       except OSError:
-        print('Error sending icmp request.')
+        return
     else:
       # If whole request is sent than clear previous response
       self.clear_response_data()
-    self.recieve_response()
 
   def recieve_response(self):
     """Receive ICMP package"""
     try:
       response, address = self.socket.recvfrom(256)
     except OSError:
-      print('Error while recieving icmp response')
-    self.request_timer.stop()
+      return
     self.recieved += len(response)
     self.response += response
     if self.recieved >= 4 and not self.response_length:
       total_length_raw = self.response[2:4]
-      self.response_length = struct.unpack("!H", total_length_raw)[0]
+      try:
+        self.response_length = struct.unpack("!H", total_length_raw)[0]
+      except struct.error:
+        self.abort()
+        return
     if self.response_length == self.recieved:
+      self.request_timer.stop()
       self.parse_response(self.response)
 
   def parse_IP_header(self, message):
     ip_header_raw = message[:ICMP.ip_header_length]
-    ip_header = struct.unpack('!' + ICMP.ip_header_format, ip_header_raw)
-    ip = {
-        'Version': (ip_header[0] >> 4) & 0x0f,
-        'IHL': ip_header[0] & 0x0f,
-        'DSCP': (ip_header[1] >> 2) & 63,
-        'ECN': ip_header[1] & 3,
-        'Total Length': ip_header[2],
-        'Identification': ip_header[3],
-        'Flags': (ip_header[4] >> 13) & 7,
-        'Offset': ip_header[4] & ~(7 << 13),
-        'TTL': ip_header[5],
-        'Protocol': ip_header[6],
-        'Checksum': ip_header[7],
-        # Not sure about big byteorder
-        'Source': socket.inet_ntoa(ip_header[8].to_bytes(4, byteorder='big')),
-        'Destination': socket.inet_ntoa(ip_header[9].to_bytes(4, byteorder='big'))
-        }
+    try:
+      ip_header = struct.unpack('!' + ICMP.ip_header_format, ip_header_raw)
+      ip = {
+          'Version': (ip_header[0] >> 4) & 0x0f,
+          'IHL': ip_header[0] & 0x0f,
+          'DSCP': (ip_header[1] >> 2) & 63,
+          'ECN': ip_header[1] & 3,
+          'Total Length': ip_header[2],
+          'Identification': ip_header[3],
+          'Flags': (ip_header[4] >> 13) & 7,
+          'Offset': ip_header[4] & ~(7 << 13),
+          'TTL': ip_header[5],
+          'Protocol': ip_header[6],
+          'Checksum': ip_header[7],
+          # Not sure about big byteorder
+          'Source': socket.inet_ntoa(ip_header[8].to_bytes(4, byteorder='big')),
+          'Destination': socket.inet_ntoa(ip_header[9].to_bytes(4, byteorder='big'))
+          }
+    except struct.error:
+      ip = {}
     return ip, message[ICMP.ip_header_length:]
 
   def generic_parse(self, response):
-    icmp_packet = struct.unpack('!2BH', response[:4])
-    print(icmp_packet[0])
-    icmp = {
-        'Type': icmp_packet[0],
-        'Code': icmp_packet[1],
-        'Checksum': icmp_packet[2],
-        'Type Description': icmp_types[icmp_packet[0]]['name'],
-        'Code Description': icmp_types[icmp_packet[0]]['code'][icmp_packet[1]] if icmp_types[icmp_packet[0]]['code'] else 0
-        }
+    try:
+      icmp_packet = struct.unpack('!2BH', response[:4])
+      icmp = {
+          'Type': icmp_packet[0],
+          'Code': icmp_packet[1],
+          'Checksum': icmp_packet[2],
+          'Type Description': icmp_types[icmp_packet[0]]['name'],
+          'Code Description': icmp_types[icmp_packet[0]]['code'][icmp_packet[1]] if icmp_types[icmp_packet[0]]['code'] else 0
+          }
+    except (KeyError, IndexError, struct.error):
+      return {}
     return icmp
 
   def get_response(self):
     """Getter for response"""
     return self.parsed_response
 
-  def process_event():
+  def process_event(self):
     """Event handler for select events"""
     if self.request_timer.time() > ICMP.sec_before_timeout:
+      self.abort()
       raise net_exception.NetTimeoutException()
+    if self.to_be_sent:
+      self.send_package()
+    else:
+      self.recieve_response()
+
+  def abort(self):
+    # Clear all incoming data from socket
+    while True:
+      try:
+        self.socket.recv(4096)
+      except:
+        break
+    self.to_be_sent = 0
+    self.package = ''
+    self.clear_response_data()
 
   @abstractmethod
   def parse_response(self, response):
@@ -204,20 +235,26 @@ class ICMP_Echo(ICMP):
   def parse_response(self, response):
     """Parse response and construct dictionary with values from response"""
     ip, icmp_packet_raw = self.parse_IP_header(response)
-    icmp_type_raw = bytes([icmp_packet_raw[0]])
-    icmp_type = struct.unpack("!B", icmp_type_raw)[0]
-    if icmp_type != self.reply_icmp_type:
-      icmp = self.generic_parse(icmp_packet_raw)
+    if icmp_packet_raw:
+      icmp_type_raw = bytes([icmp_packet_raw[0]])
+      try:
+        icmp_type = struct.unpack("!B", icmp_type_raw)[0]
+        if icmp_type != self.reply_icmp_type:
+          icmp = self.generic_parse(icmp_packet_raw)
+        else:
+          icmp_packet = struct.unpack('!' + self.icmp_format, icmp_packet_raw)
+          icmp = {
+              'Type': icmp_packet[0],
+              'Code': icmp_packet[1],
+              'Checksum': icmp_packet[2],
+              'Identifier': icmp_packet[3],
+              'Sequence': icmp_packet[4],
+              'Data': icmp_packet[5].decode('ascii')
+              }
+      except struct.error:
+        icmp = {}
     else:
-      icmp_packet = struct.unpack('!' + self.icmp_format, icmp_packet_raw)
-      icmp = {
-          'Type': icmp_packet[0],
-          'Code': icmp_packet[1],
-          'Checksum': icmp_packet[2],
-          'Identifier': icmp_packet[3],
-          'Sequence': icmp_packet[4],
-          'Data': icmp_packet[5].decode('ascii')
-          }
+      icmp = {}
     self.parsed_response = {'ip': ip, 'icmp': icmp, 'time': self.request_timer.time()}
     self.response_ready = True
 
@@ -249,22 +286,28 @@ class ICMP_Timestamp(ICMP):
   def parse_response(self, response):
     """Parse response and construct dictionary with values from response"""
     ip, icmp_packet_raw = self.parse_IP_header(response)
-    icmp_type_raw = bytes([icmp_packet_raw[0]])
-    icmp_type = struct.unpack("!B", icmp_type_raw)[0]
-    if icmp_type != self.reply_icmp_type:
-      icmp = self.generic_parse(icmp_packet_raw)
+    if icmp_packet_raw:
+      icmp_type_raw = bytes([icmp_packet_raw[0]])
+      try:
+        icmp_type = struct.unpack("!B", icmp_type_raw)[0]
+        if icmp_type != self.reply_icmp_type:
+          icmp = self.generic_parse(icmp_packet_raw)
+        else:
+          icmp_packet = struct.unpack('!' + self.icmp_format, icmp_packet_raw)
+          icmp = {
+              'Type': icmp_packet[0],
+              'Code': icmp_packet[1],
+              'Checksum': icmp_packet[2],
+              'Identifier': icmp_packet[3],
+              'Sequence': icmp_packet[4],
+              'Originate Timestamp': icmp_packet[5],
+              'Receive Timestamp': icmp_packet[6],
+              'Transmit Timestamp': icmp_packet[7]
+              }
+      except struct.error:
+        icmp = {}
     else:
-      icmp_packet = struct.unpack('!' + self.icmp_format, icmp_packet_raw)
-      icmp = {
-          'Type': icmp_packet[0],
-          'Code': icmp_packet[1],
-          'Checksum': icmp_packet[2],
-          'Identifier': icmp_packet[3],
-          'Sequence': icmp_packet[4],
-          'Originate Timestamp': icmp_packet[5],
-          'Receive Timestamp': icmp_packet[6],
-          'Transmit Timestamp': icmp_packet[7]
-          }
+      icmp = {}
     self.parsed_response = {'ip': ip, 'icmp': icmp, 'time': self.request_timer.time()}
     self.response_ready = True
 
