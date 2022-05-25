@@ -5,6 +5,7 @@ import socket
 import functools
 import datetime
 from abc import ABC, abstractmethod
+from logger import Logger
 
 import net_exception
 import timer
@@ -23,8 +24,10 @@ class ICMP(ABC):
 
     def __init__(self, destination, source):
         if not ip.check(destination):
+            Logger.err("Invalid destination address")
             raise ValueError("Wrong destination ip format")
         if not ip.check(source):
+            Logger.err("Invalid source address")
             raise ValueError("Wrong source ip format")
         self.destination = destination
         self.source = source
@@ -114,16 +117,19 @@ class ICMP(ABC):
                 self.to_be_sent -= sent
                 self.package = self.package[sent:]
             except OSError:
+                Logger.warn("Error sending package")
                 return
-        else:
-            # If whole request is sent than clear previous response
-            self.clear_response_data()
+            if not self.to_be_sent:
+                Logger.info(f"ICMP sent to {self.destination}")
+                # If whole request is sent than clear previous response
+                self.clear_response_data()
 
     def recieve_response(self):
         """Receive ICMP package"""
         try:
             response, address = self.socket.recvfrom(256)
         except OSError:
+            Logger.warn("Error while reading response")
             return
         self.recieved += len(response)
         self.response += response
@@ -132,9 +138,11 @@ class ICMP(ABC):
             try:
                 self.response_length = struct.unpack("!H", total_length_raw)[0]
             except struct.error:
+                Logger.err("Error while parsing a package. Abort...")
                 self.abort()
                 return
         if self.response_length == self.recieved:
+            Logger.info(f"Package from {self.destination} recieved")
             self.request_timer.stop()
             self.parse_response(self.response)
 
@@ -159,6 +167,7 @@ class ICMP(ABC):
                 'Destination': socket.inet_ntoa(ip_header[9].to_bytes(4, byteorder='big'))
             }
         except struct.error:
+            Logger.err("Error while parsing ip header")
             ip = {}
         return ip, message[ICMP.ip_header_length:]
 
@@ -179,6 +188,7 @@ class ICMP(ABC):
                 'Code Description':  code
             }
         except (KeyError, IndexError, struct.error):
+            Logger.err("Error while parsing ICMP")
             return {}
         return icmp
 
@@ -189,6 +199,7 @@ class ICMP(ABC):
     def process_event(self):
         """Event handler for select events"""
         if self.request_timer.time() > ICMP.sec_before_timeout:
+            Logger.warn("Response waiting timeout")
             self.abort()
             raise net_exception.NetTimeoutException()
         if self.to_be_sent:
@@ -202,6 +213,7 @@ class ICMP(ABC):
             try:
                 self.socket.recv(4096)
             except OSError:
+                Logger.info("Receive buffer cleared")
                 break
         self.to_be_sent = 0
         self.package = ''
@@ -260,8 +272,10 @@ class ICMP_Echo(ICMP):
                         'Data': icmp_packet[5].decode('ascii')
                     }
             except struct.error:
+                Logger.err("Errow while parsing ICMP")
                 icmp = {}
         else:
+            Logger.err("Response is empty")
             icmp = {}
         self.parsed_response = {'ip': ip, 'icmp': icmp, 'time': self.request_timer.time()}
         self.response_ready = True
@@ -314,8 +328,10 @@ class ICMP_Timestamp(ICMP):
                         'Transmit Timestamp': icmp_packet[7]
                     }
             except struct.error:
+                Logger.err("Error while parsing ICMP")
                 icmp = {}
         else:
+            Logger.err("Response is empty")
             icmp = {}
         self.parsed_response = {'ip': ip, 'icmp': icmp, 'time': self.request_timer.time()}
         self.response_ready = True
