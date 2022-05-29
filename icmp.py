@@ -32,8 +32,8 @@ class ICMP(ABC):
         self.destination = destination
         self.source = source
         self.sequence = 0
-        self.identifier = ICMP.identifier
-        ICMP.identifier += 1
+        self.identifier = type(self).identifier
+        type(self).identifier += 1
         self.clear_response_data()
         self.request_timer = timer.Timer()
 
@@ -64,10 +64,10 @@ class ICMP(ABC):
         version_and_length = (version << 4) | length
         dscp_and_ecn = (dscp << 2) | ecn
         flags_and_offset = (flags << 13) | offset
-        ip_header = struct.pack('>' + ICMP.ip_header_format, version_and_length, dscp_and_ecn, total_length,
+        ip_header = struct.pack('>' + self.ip_header_format, version_and_length, dscp_and_ecn, total_length,
                                 identification, flags_and_offset, ttl, protocol, checksum, source, destination)
         checksum = self.compute_checksum(ip_header)
-        ip_header = struct.pack('!' + ICMP.ip_header_format, version_and_length, dscp_and_ecn, total_length,
+        ip_header = struct.pack('!' + self.ip_header_format, version_and_length, dscp_and_ecn, total_length,
                                 identification, flags_and_offset, ttl, protocol, checksum, source, destination)
         return ip_header + message
 
@@ -147,9 +147,9 @@ class ICMP(ABC):
             self.parse_response(self.response)
 
     def parse_IP_header(self, message):
-        ip_header_raw = message[:ICMP.ip_header_length]
+        ip_header_raw = message[:self.ip_header_length]
         try:
-            ip_header = struct.unpack('!' + ICMP.ip_header_format, ip_header_raw)
+            ip_header = struct.unpack('!' + self.ip_header_format, ip_header_raw)
             ip = {
                 'Version': (ip_header[0] >> 4) & 0x0f,
                 'IHL': ip_header[0] & 0x0f,
@@ -169,7 +169,7 @@ class ICMP(ABC):
         except struct.error:
             logging.warning("Error while parsing ip header")
             ip = {}
-        return ip, message[ICMP.ip_header_length:]
+        return ip, message[self.ip_header_length:]
 
     def generic_parse(self, response):
         try:
@@ -198,7 +198,7 @@ class ICMP(ABC):
 
     def process_event(self):
         """Event handler for select events"""
-        if self.request_timer.time() > ICMP.sec_before_timeout:
+        if self.request_timer.time() > self.sec_before_timeout:
             logging.warning("Response waiting timeout")
             self.abort()
             raise net_exception.NetTimeoutException()
