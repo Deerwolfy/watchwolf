@@ -297,7 +297,7 @@ class Echo(ICMP):
                 checksum, self.icmp_packet.identifier,
                 self.icmp_packet.sequence, self.data.encode('ascii'))
 
-        #self.icmp_packet.sequence += 1
+        self.icmp_packet.sequence += 1
         log.debug("Packed icmp %s", icmp_packed)
         self.request.data = self.add_ip_headers(icmp_packed)
         self.request.to_be_sent = len(self.request.data)
@@ -366,7 +366,7 @@ class Timestamp(ICMP):
                 checksum, self.icmp_packet.identifier,
                 self.icmp_packet.sequence, originate_timestamp, 0, 0)
 
-        #self.icmp_packet.sequence += 1
+        self.icmp_packet.sequence += 1
         self.request.data = self.add_ip_headers(icmp_packed)
         self.request.to_be_sent = len(self.request.data)
         log.debug("Packed icmp %s", icmp_packed)
