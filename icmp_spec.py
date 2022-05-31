@@ -1,5 +1,5 @@
 """Defines ICMP protocol types, codes and descriptions"""
-icmp_types = [
+type_codes = [
     {'name': 'Echo Reply', 'codes': []},
     None,
     None,

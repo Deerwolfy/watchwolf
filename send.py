@@ -9,7 +9,10 @@ if __name__ == '__main__':
     dest = LOCALHOST
     src = LOCALHOST
 
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(
+            format='%(levelname)s: %(asctime)s: %(name)s: %(message)s',
+            level=logging.DEBUG,
+            datefmt='%m-%d-%Y %I:%M:%S %p')
     package = icmp.Echo(destination=dest, source=src)
     package.send_package()
     while not package.is_response_ready():

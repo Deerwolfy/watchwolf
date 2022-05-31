@@ -11,13 +11,15 @@ import threading
 import collections
 from types import SimpleNamespace
 
+from icmp_spec import type_codes
 import net_exception
 import timer
 import ip
-from icmp_type import icmp_types
 
 BIG_ENDIAN = 0
 LITTLE_ENDIAN = 1
+
+log = logging.getLogger(__name__)
 
 def sixteen_bit_complement(seq, endianess=BIG_ENDIAN):
     """Compute chesksum as 16-bit one's complement"""
@@ -45,6 +47,7 @@ def sixteen_bit_complement(seq, endianess=BIG_ENDIAN):
     sixteens_sum += (sixteens_sum >> 16)
     # Invert and truncate hight order ones
     checksum = ~sixteens_sum & 0xffff
+    log.debug("Checksum: %s", checksum)
     return checksum
 
 class ICMP(abc.ABC):
@@ -58,10 +61,10 @@ class ICMP(abc.ABC):
 
     def __init__(self, destination, source):
         if not ip.check(destination):
-            logging.error("Invalid destination address")
+            log.error("Invalid destination address")
             raise ValueError("Wrong destination ip format")
         if not ip.check(source):
-            logging.error("Invalid source address")
+            log.error("Invalid source address")
             raise ValueError("Wrong source ip format")
 
         self.icmp_packet = SimpleNamespace(format='2BH', sequence=0,
@@ -70,6 +73,7 @@ class ICMP(abc.ABC):
             type(self).identifier += 1
         self.ip_header = self.IP_Header('2B3H2BH2I',
                 20, 4, 5, 0, 0, 0, 0, 0, 64, 1, destination, source)
+        log.debug("IP headers:\n%s\n", self.ip_header)
         self.elapsed_timer = timer.Timer()
         self.request = None
         self.response = None
@@ -109,16 +113,19 @@ class ICMP(abc.ABC):
                 self.ip_header.identification, flags_and_offset,
                 self.ip_header.ttl, self.ip_header.protocol,
                 checksum, source_byte, destination_byte)
+        log.debug("Packed IP headers: %s", header)
         return header + message
 
     def clear_response_data(self):
         """Clear variables from old response"""
         self.response = SimpleNamespace(raw=b'', parsed={}, is_ready=False,
                 recieved=0, length=0)
+        log.debug("Response data cleared")
 
     def clear_request_data(self):
         """Clear variables from old request"""
         self.request = SimpleNamespace(data='', to_be_sent=0)
+        log.debug("Request data cleared")
 
     def send_package(self):
         """Send next ICMP package"""
@@ -130,11 +137,13 @@ class ICMP(abc.ABC):
                         (self.ip_header.destination, 0))
                 self.request.to_be_sent -= sent
                 self.request.data = self.request.data[sent:]
+                log.debug("Sent %s bytes, remaining %s bytes",
+                        sent, self.request.to_be_sent)
             except OSError:
-                logging.warning("Error sending package")
+                log.warning("Error sending package")
                 return
             if not self.request.to_be_sent:
-                logging.debug("ICMP sent to %s", self.ip_header.destination)
+                log.info("ICMP sent to %s", self.ip_header.destination)
                 # If whole request is sent than clear previous response
                 self.clear_response_data()
 
@@ -143,20 +152,23 @@ class ICMP(abc.ABC):
         try:
             response, _ = self.socket.recvfrom(256)
         except OSError:
-            logging.warning("Error while reading response")
+            log.warning("Error while reading response")
             return
         self.response.recieved += len(response)
         self.response.raw += response
+        log.debug("Recieved %s bytes", self.response.recieved)
         if self.response.recieved >= 4 and not self.response.length:
             total_length_raw = self.response.raw[2:4]
             try:
                 self.response.length = struct.unpack("!H", total_length_raw)[0]
+                log.debug("Expected response length: %s",
+                        self.response.length)
             except struct.error:
-                logging.error("Error while parsing a package.")
+                log.error("Error while parsing response length")
                 self.abort()
                 return
         if self.response.length == self.response.recieved:
-            logging.debug("Package from %s recieved",
+            log.info("Package from %s recieved",
                     self.ip_header.destination)
             self.elapsed_timer.stop()
             self.parse_response(self.response.raw)
@@ -186,32 +198,35 @@ class ICMP(abc.ABC):
                     .to_bytes(4, byteorder='big'))
             }
         except struct.error:
-            logging.warning("Error while parsing ip header")
+            log.warning("Error while parsing ip header")
             ip_parsed = {}
+        log.debug("Parsed response IP headers: \n%s\n", ip_parsed)
         return ip_parsed, message[self.ip_header.length:]
 
     def generic_parse(self, response):
         """Parser for general fields in ICMP package"""
+        log.debug("Using generic parser")
         try:
             icmp_unpacked = struct.unpack('!' + self.icmp_packet.format,
                     response[:4])
             # If response type has codes
-            if icmp_types[icmp_unpacked[0]]['code']:
+            if type_codes[icmp_unpacked[0]]['code']:
                 # Get code by index
-                code = icmp_types[icmp_unpacked[0]]['code'][icmp_unpacked[1]]
+                code = type_codes[icmp_unpacked[0]]['code'][icmp_unpacked[1]]
             else:
                 code = 0
-            icmp = {
+            icmp_parsed = {
                 'Type': icmp_unpacked[0],
                 'Code': icmp_unpacked[1],
                 'Checksum': icmp_unpacked[2],
-                'Type Description': icmp_types[icmp_unpacked[0]]['name'],
+                'Type Description': type_codes[icmp_unpacked[0]]['name'],
                 'Code Description':  code
             }
         except (KeyError, IndexError, struct.error):
-            logging.warning("Error while parsing ICMP")
-            icmp = {}
-        return icmp
+            log.warning("Error while parsing ICMP")
+            icmp_parsed = {}
+        log.debug("Parsed response icmp: \n%s\n", icmp_parsed)
+        return icmp_parsed
 
     def get_response(self):
         """Getter for response"""
@@ -224,7 +239,7 @@ class ICMP(abc.ABC):
     def process_event(self):
         """Event handler for select events"""
         if self.elapsed_timer.time() > self.sec_before_timeout:
-            logging.warning("Response waiting timeout")
+            log.warning("Response waiting timeout")
             self.abort()
             raise net_exception.NetTimeoutException()
         if self.request.to_be_sent:
@@ -235,11 +250,12 @@ class ICMP(abc.ABC):
     def abort(self):
         """Abort recieving and reset state"""
         # Clear all incoming data from socket
+        log.debug("Abort")
         while True:
             try:
                 self.socket.recv(4096)
             except OSError:
-                logging.info("Receive buffer cleared")
+                log.debug("Receive buffer cleared")
                 break
         self.clear_request_data()
         self.clear_response_data()
@@ -265,6 +281,7 @@ class Echo(ICMP):
         self.icmp_packet.format = f'2B3H{self.data_length}s'
         self.icmp_packet.type = 8
         self.icmp_packet.code = 0
+        log.debug("ICMP headers: \n%s\n", self.icmp_packet)
 
     def create_package(self):
         """Create ICMP Echo request"""
@@ -281,6 +298,7 @@ class Echo(ICMP):
                 self.icmp_packet.sequence, self.data.encode('ascii'))
 
         #self.icmp_packet.sequence += 1
+        log.debug("Packed icmp %s", icmp_packed)
         self.request.data = self.add_ip_headers(icmp_packed)
         self.request.to_be_sent = len(self.request.data)
 
@@ -292,6 +310,8 @@ class Echo(ICMP):
             try:
                 icmp_type = struct.unpack("!B", icmp_type_raw)[0]
                 if icmp_type != self.reply_icmp_type:
+                    logging.warning("Wrong ICMP response type %s expected %s",
+                            icmp_type, self.reply_icmp_type)
                     icmp_parsed = self.generic_parse(icmp_packet_raw)
                 else:
                     icmp_unpacked = struct.unpack(
@@ -305,16 +325,17 @@ class Echo(ICMP):
                         'Data': icmp_unpacked[5].decode('ascii')
                     }
             except struct.error:
-                logging.warning("Errow while parsing ICMP")
+                log.warning("Errow while parsing ICMP")
                 icmp_parsed = {}
         else:
-            logging.warning("Response is empty")
+            log.warning("Response is empty")
             icmp_parsed = {}
         self.response.parsed = {
                 'ip': ip_parsed,
                 'icmp': icmp_parsed,
                 'time': self.elapsed_timer.time()
                 }
+        log.debug("Parsed response: \n%s\n", self.response.parsed)
         self.response.is_ready = True
 
 class Timestamp(ICMP):
@@ -325,6 +346,7 @@ class Timestamp(ICMP):
         self.icmp_packet.format = '2B3H3I'
         self.icmp_packet.type = 13
         self.icmp_packet.code = 0
+        log.debug("ICMP headers: \n%s\n", self.icmp_packet)
 
     def create_package(self):
         """Create ICMP Echo request"""
@@ -347,6 +369,7 @@ class Timestamp(ICMP):
         #self.icmp_packet.sequence += 1
         self.request.data = self.add_ip_headers(icmp_packed)
         self.request.to_be_sent = len(self.request.data)
+        log.debug("Packed icmp %s", icmp_packed)
 
     def parse_response(self, response):
         """Parse response and construct dictionary with values from response"""
@@ -356,6 +379,8 @@ class Timestamp(ICMP):
             try:
                 icmp_type = struct.unpack("!B", icmp_type_raw)[0]
                 if icmp_type != self.reply_icmp_type:
+                    logging.warning("Wrong ICMP response type %s expected %s",
+                            icmp_type, self.reply_icmp_type)
                     icmp_parsed = self.generic_parse(icmp_packet_raw)
                 else:
                     icmp_unpacked = struct.unpack('!' + self.icmp_packet.format,
@@ -371,13 +396,14 @@ class Timestamp(ICMP):
                         'Transmit Timestamp': icmp_unpacked[7]
                     }
             except struct.error:
-                logging.warning("Error while parsing ICMP")
+                log.warning("Error while parsing ICMP")
                 icmp_parsed = {}
         else:
-            logging.warning("Response is empty")
+            log.warning("Response is empty")
             icmp_parsed = {}
         self.response.parsed = {
                 'ip': ip_parsed,
                 'icmp': icmp_parsed,
                 'time': self.elapsed_timer.time()}
+        log.debug("Parsed response: \n%s\n", self.response.parsed)
         self.response.is_ready = True
