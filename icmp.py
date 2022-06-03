@@ -15,6 +15,7 @@ from icmp_spec import type_codes
 import net_exception
 import timer
 import ip
+import helpers
 
 BIG_ENDIAN = 0
 LITTLE_ENDIAN = 1
@@ -73,7 +74,8 @@ class ICMP(abc.ABC):
             type(self).identifier += 1
         self.ip_header = self.IP_Header('2B3H2BH2I',
                 20, 4, 5, 0, 0, 0, 0, 0, 64, 1, destination, source)
-        log.debug("IP headers:\n%s\n", self.ip_header)
+        log.debug("IP headers:\n%s\n",
+                helpers.to_json(self.ip_header._asdict()))
         self.elapsed_timer = timer.Timer()
         self.request = None
         self.response = None
@@ -127,7 +129,7 @@ class ICMP(abc.ABC):
         self.request = SimpleNamespace(data='', to_be_sent=0)
         log.debug("Request data cleared")
 
-    def send_package(self):
+    def send(self):
         """Send next ICMP package"""
         self.create_package()
         self.elapsed_timer.start()
@@ -147,7 +149,7 @@ class ICMP(abc.ABC):
                 # If whole request is sent than clear previous response
                 self.clear_response_data()
 
-    def recieve_response(self):
+    def recieve(self):
         """Receive ICMP package"""
         try:
             response, _ = self.socket.recvfrom(256)
@@ -200,7 +202,8 @@ class ICMP(abc.ABC):
         except struct.error:
             log.warning("Error while parsing ip header")
             ip_parsed = {}
-        log.debug("Parsed response IP headers: \n%s\n", ip_parsed)
+        log.debug("Parsed response IP headers: \n%s\n",
+                helpers.to_json(ip_parsed))
         return ip_parsed, message[self.ip_header.length:]
 
     def generic_parse(self, response):
@@ -225,7 +228,7 @@ class ICMP(abc.ABC):
         except (KeyError, IndexError, struct.error):
             log.warning("Error while parsing ICMP")
             icmp_parsed = {}
-        log.debug("Parsed response icmp: \n%s\n", icmp_parsed)
+        log.debug("Parsed response icmp: \n%s\n", helpers.to_json(icmp_parsed))
         return icmp_parsed
 
     def get_response(self):
@@ -236,16 +239,28 @@ class ICMP(abc.ABC):
         """Getter for response readiness"""
         return self.response.is_ready
 
-    def process_event(self):
-        """Event handler for select events"""
+    def is_timeouted(self, timeout):
+        """Check if elapsed time greater than passed timeout in seconds"""
+        return self.elapsed_timer.time() >= timeout
+
+    def get_elapsed_time(self):
+        """Getter for elapsed time"""
+        return self.elapsed_timer.time()
+
+    def get_scoket(self):
+        """Socket getter"""
+        return self.socket
+
+    def do_lap(self):
+        """Do one loop iteration"""
         if self.elapsed_timer.time() > self.sec_before_timeout:
             log.warning("Response waiting timeout")
             self.abort()
             raise net_exception.NetTimeoutException()
         if self.request.to_be_sent:
-            self.send_package()
+            self.send()
         else:
-            self.recieve_response()
+            self.recieve()
 
     def abort(self):
         """Abort recieving and reset state"""
@@ -281,7 +296,8 @@ class Echo(ICMP):
         self.icmp_packet.format = f'2B3H{self.data_length}s'
         self.icmp_packet.type = 8
         self.icmp_packet.code = 0
-        log.debug("ICMP headers: \n%s\n", self.icmp_packet)
+        log.debug("ICMP headers: \n%s\n",
+                helpers.to_json(vars(self.icmp_packet)))
 
     def create_package(self):
         """Create ICMP Echo request"""
@@ -335,7 +351,8 @@ class Echo(ICMP):
                 'icmp': icmp_parsed,
                 'time': self.elapsed_timer.time()
                 }
-        log.debug("Parsed response: \n%s\n", self.response.parsed)
+        log.debug("Parsed response: \n%s\n",
+                helpers.to_json(self.response.parsed))
         self.response.is_ready = True
 
 class Timestamp(ICMP):
@@ -346,7 +363,8 @@ class Timestamp(ICMP):
         self.icmp_packet.format = '2B3H3I'
         self.icmp_packet.type = 13
         self.icmp_packet.code = 0
-        log.debug("ICMP headers: \n%s\n", self.icmp_packet)
+        log.debug("ICMP headers: \n%s\n",
+                helpers.to_json(vars(self.icmp_packet)))
 
     def create_package(self):
         """Create ICMP Echo request"""
@@ -405,5 +423,6 @@ class Timestamp(ICMP):
                 'ip': ip_parsed,
                 'icmp': icmp_parsed,
                 'time': self.elapsed_timer.time()}
-        log.debug("Parsed response: \n%s\n", self.response.parsed)
+        log.debug("Parsed response: \n%s\n",
+                helpers.to_json(self.response.parsed))
         self.response.is_ready = True
