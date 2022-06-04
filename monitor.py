@@ -2,7 +2,6 @@
 
 import logging
 import socket
-import struct
 import json
 import select
 import types
@@ -12,6 +11,7 @@ import helpers
 def recv_data(testers, log, sock):
     """Recieve data from tester"""
     address = sock.getpeername()
+    recieved = b""
     try:
         recieved = sock.recv(4096)
     except OSError:
@@ -20,28 +20,46 @@ def recv_data(testers, log, sock):
     log.debug("Recieved %s from %s", recieved, address)
     tester = testers[address]
     tester.recieved += recieved
-    total_length_recv = len(tester.recieved)
-    if not tester.expected and total_length_recv >= 4:
-        log.debug("Recieved >= 4 bytes from %s", address)
-        raw_length = tester.recieved[:4]
-        try:
-            tester.expected = struct.unpack("!i", raw_length)[0]
-        except struct.error:
-            log.error("Error parsing data length from %s", address)
-            tester.sock.shutdown(socket.SHUT_RDWR)
-            tester.sock.close()
-            log.debug("Connection closed with %s", address)
-            return None
-        log.debug("Size is %s", tester.expected)
-        tester.recieved = tester.recieved[4:]
-
-    if tester.recieved and tester.expected == len(tester.recieved):
-        log.debug("Recieved all data from host %s", address)
-        decoded = tester.recieved.decode('ascii')
-        tester.recieved = b""
-        tester.expected = 0
-        return decoded
+    if "\n".encode("ascii") in tester.recieved:
+        log.debug("Recieved complete message from host %s", address)
+        tester.recieved = tester.recieved.decode("ascii")
+        last_completed = True
+        if tester.recieved[-1] != "\n":
+            log.debug("Last recieved message is incomplete")
+            last_completed = False
+        messages = tester.recieved.split("\n")
+        if last_completed:
+            tester.recieved = b""
+        else:
+            last = messages.pop()
+            tester.recieved = last.encode('ascii')
+        log.debug("Recieved messages %s", messages)
+        return messages
     return None
+
+def process_request(log, requests, conf, tester):
+    """Process requests from testers"""
+    while requests:
+        request = requests.pop(0)
+        log.debug("Processing request %s", request)
+        request_name = ""
+        request_value = ""
+        try:
+            request_name, request_value = request.split(":")
+        except ValueError:
+            log.error("Error parsing request from %s", tester.address)
+            return
+        if request_name == "NAME":
+            tester.name = request_value
+        elif request_name == "CONFIG_REQUEST":
+            try:
+                del conf["general"]
+            except KeyError:
+                log.info("General directive in remote conf not found")
+            prepared_conf = str(conf).replace("\'", '"') + "\n"
+            log.debug("Sending config to %s: \n%s\n", tester.address,
+                    helpers.to_json(prepared_conf))
+            tester.sock.sendall(prepared_conf.encode('ascii'))
 
 def testers_loop(server_socket, conf, log):
     """Main loop for connections from testers"""
@@ -59,16 +77,18 @@ def testers_loop(server_socket, conf, log):
                 log.info("Accepting connection from %s", address)
                 log.debug("Accepted peer name %s", client.getpeername())
                 testers[address] = types.SimpleNamespace(sock=client,
-                        recieved=b"",expected=0,sent=0,to_be_sent=0,
-                        data_to_sent=b"")
+                        recieved=b"",data_to_sent=b"",name="",
+                        address=client.getpeername())
                 r_list.append(client)
             else:
-                if recv_data(testers, log, sock):
-                    pass
+                messages = recv_data(testers, log, sock)
+                if messages:
+                    process_request(log, messages, conf,
+                            testers[sock.getpeername()])
 
     for address, tester in testers:
         log.debug("Closing connection with %s", address)
-        tester.sock.shutdown()
+        tester.sock.shutdown(socket.SHUT_RDWR)
         tester.sock.close()
 
 def start(conf):
