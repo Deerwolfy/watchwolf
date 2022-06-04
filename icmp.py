@@ -12,7 +12,6 @@ import collections
 from types import SimpleNamespace
 
 from icmp_spec import type_codes
-import net_exception
 import timer
 import ip
 import helpers
@@ -256,7 +255,7 @@ class ICMP(abc.ABC):
         if self.elapsed_timer.time() > self.sec_before_timeout:
             log.warning("Response waiting timeout")
             self.abort()
-            raise net_exception.NetTimeoutException()
+            raise TimeoutError(f"Host {self.ip_header.destination}")
         if self.request.to_be_sent:
             self.send()
         else:

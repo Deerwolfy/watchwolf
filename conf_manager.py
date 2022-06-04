@@ -69,5 +69,5 @@ def parse(conf):
             log.debug("Cookies end")
             log.debug("Read cookies: \n%s\n",
                     helpers.to_json(parsed[key]['cookie']))
-    log.debug("Done reading conf, conf: \n%s\n", helpers.to_json(parsed))
+    log.debug("Done parsing conf, conf: \n%s\n", helpers.to_json(parsed))
     return parsed
