@@ -40,6 +40,10 @@ def get_config(log, name, host, port):
         except OSError:
             log.warning("Error reading response from %s", host)
         else:
+            if not recieved_data:
+                log.debug("Monitor %s closed connection", host)
+                mon_sock.close()
+                return (None, "")
             log.debug("Recieved data %s", recieved_data)
             if "\n".encode("ascii") in recieved_data:
                 log.debug("Data is recieved")
@@ -47,6 +51,7 @@ def get_config(log, name, host, port):
         log.debug("Elapsed time %s", elapsed_timer.time())
         if elapsed_timer.time() >= timeout:
             log.error("Request to monitor %s timeouted", host)
+            mon_sock.close()
             return (None, "")
     return (mon_sock, recieved_data.decode("ascii"))
 
