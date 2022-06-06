@@ -4,6 +4,7 @@ import logging
 import socket
 import select
 import types
+import json
 
 import helpers
 
@@ -47,14 +48,24 @@ def process_request(log, requests, tester):
         request_name = ""
         request_value = ""
         try:
-            request_name, request_value = request.split(":")
+            request_name, request_value = request.split(":", 1)
         except ValueError:
             log.error("Error parsing request from %s", tester.address)
             return
         if request_name == "NAME":
+            log.debug("Set name to %s for %s", request_value, tester.address)
             tester.name = request_value
         elif request_name == "CONFIG_REQUEST":
+            log.debug("Config request from %s", tester.address)
             tester.config_requested = True
+        elif request_name == "STATS_UPDATE":
+            log.debug("Statistics update from %s", tester.address)
+            try:
+                stats = json.loads(request_value)
+            except json.JSONDecodeError:
+                log.error("Cannot parse stats from %s", tester.address)
+            log.debug("Stats \n%s\n", helpers.to_json(stats))
+            tester.stat_piece = stats
 
 def accept_connection(log, server_socket):
     """Accept incoming connection from tester"""
@@ -64,11 +75,11 @@ def accept_connection(log, server_socket):
     return types.SimpleNamespace(sock=client,
             recieved=b"",data_to_sent=b"",name="",
             address=client.getpeername(),close=False,
-            config_requested=False)
+            config_requested=False, stat_piece=None)
 
 def close_connections(log, testers):
     """Close all established connections"""
-    for address, tester in testers:
+    for address, tester in testers.items():
         log.debug("Closing connection with %s", address)
         tester.sock.shutdown(socket.SHUT_RDWR)
         tester.sock.close()
@@ -82,16 +93,18 @@ def process_read(log, sock, testers, r_list, w_list):
         log.debug("Connection lost")
         r_list.remove(sock)
         return
+    tester = testers[address]
     log.debug("Getting messages from %s", address)
-    messages = recv_data(testers[address], log, sock)
+    messages = recv_data(tester, log, sock)
     if messages:
-        process_request(log, messages,
-                testers[sock.getpeername()])
-    if testers[address].config_requested:
+        process_request(log, messages, tester)
+    if tester.config_requested:
         log.debug("Config request from %s", address)
         if not sock in w_list:
             w_list.append(sock)
-    if testers[address].close:
+    if tester.stat_piece:
+        pass
+    if tester.close:
         r_list.remove(sock)
         sock.close()
         del testers[address]
@@ -114,12 +127,7 @@ def process_write(log, sock, testers, w_list, prepared_conf):
 
 def testers_loop(server_socket, conf, log):
     """Main loop for connections from testers"""
-    try:
-        del conf["general"]
-    except KeyError:
-        log.info("General directive in remote conf not found")
-    prepared_conf = str(conf).replace("\'", '"') + "\n"
-
+    prepared_conf = json.dumps(conf) + "\n"
     log.debug("Starting main loop")
     r_list = [ server_socket ]
     w_list = []

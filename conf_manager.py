@@ -46,7 +46,7 @@ def parse(conf):
                     reading_cookie = True
                     cookies = {}
                     continue
-                val = val.strip().lower()
+                val = val.strip()
                 if not param:
                     log.error("Parameter missed %s, skipping", param)
                     continue

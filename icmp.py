@@ -76,6 +76,7 @@ class ICMP(abc.ABC):
         log.debug("IP headers:\n%s\n",
                 helpers.to_json(self.ip_header._asdict()))
         self.elapsed_timer = timer.Timer()
+        self.reply_icmp_type = 0
         self.request = None
         self.response = None
         self.clear_request_data()
@@ -209,8 +210,7 @@ class ICMP(abc.ABC):
         """Parser for general fields in ICMP package"""
         log.debug("Using generic parser")
         try:
-            icmp_unpacked = struct.unpack('!' + self.icmp_packet.format,
-                    response[:4])
+            icmp_unpacked = struct.unpack('!2BH', response[:4])
             # If response type has codes
             if type_codes[icmp_unpacked[0]]['code']:
                 # Get code by index
@@ -245,6 +245,10 @@ class ICMP(abc.ABC):
     def get_elapsed_time(self):
         """Getter for elapsed time"""
         return self.elapsed_timer.time()
+
+    def reply_good(self):
+        """Check if reply contains good response type"""
+        return self.reply_icmp_type == self.response.parsed["icmp"]["Type"]
 
     def get_scoket(self):
         """Socket getter"""
