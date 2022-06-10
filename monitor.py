@@ -66,7 +66,7 @@ def process_request(log, requests, tester, stats):
                 stats.update(json.loads(request_value))
             except json.JSONDecodeError:
                 log.error("Cannot parse stats from %s", tester.address)
-            log.debug("Stats \n%s\n", helpers.to_json(stats))
+            log.debug("Stats \n%s\n", helpers.to_json(str(stats)))
             tester.stat_piece = stats
 
 def accept_connection(log, server_socket):
