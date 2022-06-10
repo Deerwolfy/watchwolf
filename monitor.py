@@ -5,6 +5,7 @@ import socket
 import select
 import types
 import json
+import multiprocessing
 
 import helpers
 
@@ -40,7 +41,7 @@ def recv_data(tester, log, sock):
         tester.close = True
     return None
 
-def process_request(log, requests, tester):
+def process_request(log, requests, tester, stats):
     """Process requests from testers"""
     while requests:
         request = requests.pop(0)
@@ -61,7 +62,8 @@ def process_request(log, requests, tester):
         elif request_name == "STATS_UPDATE":
             log.debug("Statistics update from %s", tester.address)
             try:
-                stats = json.loads(request_value)
+                stats.clear()
+                stats.update(json.loads(request_value))
             except json.JSONDecodeError:
                 log.error("Cannot parse stats from %s", tester.address)
             log.debug("Stats \n%s\n", helpers.to_json(stats))
@@ -85,7 +87,7 @@ def close_connections(log, testers):
         tester.sock.close()
     testers = {}
 
-def process_read(log, sock, testers, r_list, w_list):
+def process_read(log, sock, testers, r_list, w_list, stats):
     """Process ready read"""
     try:
         address = sock.getpeername()
@@ -97,7 +99,7 @@ def process_read(log, sock, testers, r_list, w_list):
     log.debug("Getting messages from %s", address)
     messages = recv_data(tester, log, sock)
     if messages:
-        process_request(log, messages, tester)
+        process_request(log, messages, tester, stats)
     if tester.config_requested:
         log.debug("Config request from %s", address)
         if not sock in w_list:
@@ -125,7 +127,7 @@ def process_write(log, sock, testers, w_list, prepared_conf):
         testers[address].config_requested = False
         w_list.remove(sock)
 
-def testers_loop(server_socket, conf, log):
+def testers_loop(server_socket, conf, log, stats):
     """Main loop for connections from testers"""
     prepared_conf = json.dumps(conf) + "\n"
     log.debug("Starting main loop")
@@ -142,7 +144,7 @@ def testers_loop(server_socket, conf, log):
                 testers[new_tester.address] = new_tester
                 r_list.append(new_tester.sock)
             else:
-                process_read(log, sock, testers, r_list, w_list)
+                process_read(log, sock, testers, r_list, w_list, stats)
 
         for sock in ready_write:
             process_write(log, sock, testers, w_list, prepared_conf)
@@ -168,4 +170,6 @@ def start(conf):
     conf_socket.setblocking(False)
     conf_socket.bind((ip_address, port))
     conf_socket.listen()
-    testers_loop(conf_socket, conf, log)
+    manager = multiprocessing.Manager()
+    stats = manager.dict()
+    testers_loop(conf_socket, conf, log, stats)

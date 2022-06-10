@@ -28,21 +28,20 @@ def connect_to_monitor(log, host, port):
     except TimeoutError:
         log.error("Connection to host %s timeouted", host)
         mon_sock.close()
-        return (None, "")
+        return None
     except ConnectionRefusedError:
         log.error("Connection refused by host %s", host)
         mon_sock.close()
-        return (None, "")
+        return None
+    except ConnectionResetError:
+        log.error("Connection reset by host %s", host)
+        mon_sock.close()
+        return None
     return mon_sock
 
-def get_config(log, name, host, port):
-    """Get config string from monitor"""
-    log.debug("Getting config from %s:%s", host, port)
-    mon_sock = connect_to_monitor(log, host, port)
-    data = f"NAME:{name}\nCONFIG_REQUEST:\n".encode("ascii")
-    log.debug("Data to be send %s", data)
-    mon_sock.sendall(data)
-    log.debug("Data is sent")
+def recieve_data(log, sock):
+    """Recieve data from socket"""
+    address = sock.getpeername()
     recieved_data = b""
     elapsed_timer = timer.Timer()
     elapsed_timer.start()
@@ -50,24 +49,46 @@ def get_config(log, name, host, port):
     log.debug("Waiting for response")
     while True:
         try:
-            recieved_data += mon_sock.recv(4096)
+            recieved_data += sock.recv(4096)
         except OSError:
-            log.warning("Error reading response from %s", host)
+            log.warning("Error reading response from %s", address)
         else:
             if not recieved_data:
-                log.debug("Monitor %s closed connection", host)
-                mon_sock.close()
-                return (None, "")
+                log.debug("Monitor %s closed connection", address)
+                sock.close()
+                return ""
             log.debug("Recieved data %s", recieved_data)
             if "\n".encode("ascii") in recieved_data:
                 log.debug("Data is recieved")
                 break
         log.debug("Elapsed time %s", elapsed_timer.time())
         if elapsed_timer.time() >= timeout:
-            log.error("Request to monitor %s timeouted", host)
-            mon_sock.close()
-            return (None, "")
-    return (mon_sock, recieved_data.decode("ascii"))
+            log.error("Request to monitor %s timeouted", address)
+            sock.close()
+            return ""
+    return recieved_data.decode("ascii")
+
+
+def get_config(log, name, host, port):
+    """Get config string from monitor"""
+    log.debug("Getting config from %s:%s", host, port)
+    mon_sock = None
+    wait_time = 0
+    while not mon_sock:
+        mon_sock = connect_to_monitor(log, host, port)
+        if not mon_sock:
+            if wait_time < 60:
+                wait_time += 5
+            log.error("Connection to monitor failed. retry in %s seconds",
+                    wait_time)
+            time.sleep(wait_time)
+            continue
+    data = f"NAME:{name}\nCONFIG_REQUEST:\n".encode("ascii")
+    log.debug("Data to be send %s", data)
+    mon_sock.sendall(data)
+    log.debug("Data is sent")
+    response = recieve_data(log, mon_sock)
+    return (mon_sock, response)
 
 def create_icmp(log, conf, name, source):
     """Create object for icmp target"""
@@ -169,6 +190,7 @@ def load_http(log, url, timeout):
     https_handler = urllib.request.HTTPSHandler()
     opener = urllib.request.build_opener(http_handler, https_handler)
     with opener.open(url, timeout=timeout) as conn:
+        log.debug("Sending HTTP request to %s", url)
         data = conn.read().decode('utf-8')
         #log.debug("Data for %s is \n%s\n", url, data)
         return data
@@ -183,7 +205,7 @@ def make_http(log, http_objs, timeout):
             http = futures_http[future]
             try:
                 data = future.result()
-            except Exception as err:
+            except urllib.error.URLError as err:
                 log.error("Error loading %s, reason", http.url, err)
                 stats[http.name] = False
             else:
@@ -203,10 +225,12 @@ def run_loop(log, conf, mon_host, mon_port, mon_sock):
         stats = stats | make_http(log, http_objs, 10)
         log.debug("Lap finished")
         log.debug("Stats: \n%s\n", helpers.to_json(stats))
-        if not mon_sock:
+        try:
+            mon_sock.sendall(str("STATS_UPDATE:" +
+                    json.dumps(stats) + "\n").encode("ascii"))
+        except OSError:
+            log.error("Cannot send stats to monitor, reconnecting")
             mon_sock = connect_to_monitor(log, mon_host, mon_port)
-        mon_sock.sendall(str("STATS_UPDATE:" +
-                json.dumps(stats) + "\n").encode("ascii"))
         time.sleep(5)
 
 def start(conf):
