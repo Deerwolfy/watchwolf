@@ -6,6 +6,7 @@ import select
 import types
 import json
 import multiprocessing
+import collections
 
 import helpers
 
@@ -41,6 +42,15 @@ def recv_data(tester, log, sock):
         tester.close = True
     return None
 
+def update_stats(log, request_value, tester, stats):
+    """Update statistics from recieved data from tester"""
+    try:
+        stats.clear()
+        stats.update(json.loads(request_value))
+    except json.JSONDecodeError:
+        log.error("Cannot parse stats from %s", tester.address)
+    log.debug("Stats \n%s\n", helpers.to_json(str(stats)))
+
 def process_request(log, requests, tester, stats):
     """Process requests from testers"""
     while requests:
@@ -61,13 +71,7 @@ def process_request(log, requests, tester, stats):
             tester.config_requested = True
         elif request_name == "STATS_UPDATE":
             log.debug("Statistics update from %s", tester.address)
-            try:
-                stats.clear()
-                stats.update(json.loads(request_value))
-            except json.JSONDecodeError:
-                log.error("Cannot parse stats from %s", tester.address)
-            log.debug("Stats \n%s\n", helpers.to_json(str(stats)))
-            tester.stat_piece = stats
+            update_stats(log, request_value, tester, stats)
 
 def accept_connection(log, server_socket):
     """Accept incoming connection from tester"""
@@ -77,7 +81,7 @@ def accept_connection(log, server_socket):
     return types.SimpleNamespace(sock=client,
             recieved=b"",data_to_sent=b"",name="",
             address=client.getpeername(),close=False,
-            config_requested=False, stat_piece=None)
+            config_requested=False)
 
 def close_connections(log, testers):
     """Close all established connections"""
@@ -87,13 +91,13 @@ def close_connections(log, testers):
         tester.sock.close()
     testers = {}
 
-def process_read(log, sock, testers, r_list, w_list, stats):
+def process_read(log, sock, testers, lists, stats):
     """Process ready read"""
     try:
         address = sock.getpeername()
     except OSError:
         log.debug("Connection lost")
-        r_list.remove(sock)
+        lists.read.remove(sock)
         return
     tester = testers[address]
     log.debug("Getting messages from %s", address)
@@ -102,52 +106,51 @@ def process_read(log, sock, testers, r_list, w_list, stats):
         process_request(log, messages, tester, stats)
     if tester.config_requested:
         log.debug("Config request from %s", address)
-        if not sock in w_list:
-            w_list.append(sock)
-    if tester.stat_piece:
-        pass
+        if not sock in lists.write:
+            lists.write.append(sock)
     if tester.close:
-        r_list.remove(sock)
+        lists.read.remove(sock)
         sock.close()
         del testers[address]
         log.debug("Connection with %s closed", address)
 
-def process_write(log, sock, testers, w_list, prepared_conf):
+def process_write(log, sock, testers, lists, str_conf):
     """Process ready write"""
     try:
         address = sock.getpeername()
     except OSError:
         log.debug("Connection lost")
-        w_list.remove(sock)
+        lists.write.remove(sock)
         return
     if testers[address].config_requested:
         log.debug("Sending config to %s: \n%s\n", address,
-                helpers.to_json(prepared_conf))
-        testers[address].sock.sendall(prepared_conf.encode('ascii'))
+                helpers.to_json(str_conf))
+        testers[address].sock.sendall(str_conf.encode('ascii'))
         testers[address].config_requested = False
-        w_list.remove(sock)
+        lists.write.remove(sock)
 
 def testers_loop(server_socket, conf, log, stats):
     """Main loop for connections from testers"""
-    prepared_conf = json.dumps(conf) + "\n"
+    str_conf = json.dumps(conf) + "\n"
     log.debug("Starting main loop")
-    r_list = [ server_socket ]
-    w_list = []
+    ListsType = collections.namedtuple("Lists", "read write")
+    lists = ListsType([server_socket], [])
     testers = {}
     while True:
-        log.debug("Select lists: %s %s", r_list, w_list)
+        log.debug("Select lists: %s %s", lists.read, lists.write)
         log.debug("Testers dict: \n%s\n", testers)
-        ready_read, ready_write, _ = select.select(r_list, w_list, [])
+        ready_read, ready_write, _ = select.select(lists.read, lists.write, [],
+                15)
         for sock in ready_read:
             if sock == server_socket:
                 new_tester = accept_connection(log, server_socket)
                 testers[new_tester.address] = new_tester
-                r_list.append(new_tester.sock)
+                lists.read.append(new_tester.sock)
             else:
-                process_read(log, sock, testers, r_list, w_list, stats)
+                process_read(log, sock, testers, lists, stats)
 
         for sock in ready_write:
-            process_write(log, sock, testers, w_list, prepared_conf)
+            process_write(log, sock, testers, lists, str_conf)
 
     close_connections(log, testers)
 
@@ -173,3 +176,5 @@ def start(conf):
     manager = multiprocessing.Manager()
     stats = manager.dict()
     testers_loop(conf_socket, conf, log, stats)
+    conf_socket.shutdown(socket.SHUT_RDWR)
+    conf_socket.close()

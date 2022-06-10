@@ -37,6 +37,10 @@ def connect_to_monitor(log, host, port):
         log.error("Connection reset by host %s", host)
         mon_sock.close()
         return None
+    except OSError as error:
+        log.error("Unknown error connectiong to %s: %s", host, error)
+        mon_sock.close()
+        return None
     return mon_sock
 
 def recieve_data(log, sock):
@@ -112,7 +116,7 @@ def create_icmp(log, conf, name, source):
     return icmp_obj
 
 def populate_objs(log, conf):
-    """Create objects for targets"""
+    """Create objects for targets from config"""
     source_ip = socket.gethostbyname(socket.gethostname())
     try:
         source_ip = conf["general"]["ip"]
@@ -149,7 +153,7 @@ def populate_objs(log, conf):
     log.debug("Populated: %s %s", icmp_objs, http_objs)
     return icmp_objs, http_objs
 
-def make_icmp(log, icmp_objs, timeout):
+def send_icmp(log, icmp_objs, timeout):
     """Make icmp requests and return results"""
     r_list = [ ]
     w_list = [ ]
@@ -163,7 +167,7 @@ def make_icmp(log, icmp_objs, timeout):
     elapsed_time.start()
     while True:
         log.debug("Lists %s %s", r_list, w_list)
-        read_ready, _, _ = select.select(r_list, w_list, [])
+        read_ready, _, _ = select.select(r_list, w_list, [], timeout)
         for sock in read_ready:
             obj = icmp_objs[sock]
             log.debug("%s ready for read", obj.name)
@@ -192,10 +196,9 @@ def load_http(log, url, timeout):
     with opener.open(url, timeout=timeout) as conn:
         log.debug("Sending HTTP request to %s", url)
         data = conn.read().decode('utf-8')
-        #log.debug("Data for %s is \n%s\n", url, data)
         return data
 
-def make_http(log, http_objs, timeout):
+def send_http(log, http_objs, timeout):
     """Make http requests to targets"""
     stats = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -216,22 +219,31 @@ def make_http(log, http_objs, timeout):
                     stats[http.name] = False
     return stats
 
-def run_loop(log, conf, mon_host, mon_port, mon_sock):
+def run_loop(log, conf, monitor_data):
     """Main tester loop"""
     icmp_objs, http_objs = populate_objs(log, conf)
+    elapsed_time = timer.Timer()
+    expected_lap_time = 10
     while True:
+        elapsed_time.start()
         stats = {}
-        stats = stats | make_icmp(log, icmp_objs, 5)
-        stats = stats | make_http(log, http_objs, 10)
+        stats = stats | send_icmp(log, icmp_objs, 5)
+        stats = stats | send_http(log, http_objs, 10)
         log.debug("Lap finished")
         log.debug("Stats: \n%s\n", helpers.to_json(stats))
         try:
-            mon_sock.sendall(str("STATS_UPDATE:" +
+            monitor_data.socket.sendall(str("STATS_UPDATE:" +
                     json.dumps(stats) + "\n").encode("ascii"))
         except OSError:
             log.error("Cannot send stats to monitor, reconnecting")
-            mon_sock = connect_to_monitor(log, mon_host, mon_port)
-        time.sleep(5)
+            monitor_data.socket = connect_to_monitor(log,
+                    monitor_data.host, monitor_data.port)
+        log.debug("Lap time %s", elapsed_time.time())
+        remaining_time = expected_lap_time - elapsed_time.time()
+        log.debug("Sleeping for %s", remaining_time)
+        if remaining_time > 0:
+            time.sleep(remaining_time)
+        elapsed_time.stop()
 
 def start(conf):
     """Main loop"""
@@ -244,25 +256,26 @@ def start(conf):
         log.warning("Name is not defined, using random name: %s", name)
     monitor_host_default = "localhost"
     monitor_port_default = 5000
-    monitor_host = monitor_host_default
-    monitor_port = monitor_port_default
+    monitor_data = types.SimpleNamespace(socket=None,
+            host=monitor_host_default, port=monitor_port_default)
     try:
-        monitor_host, monitor_port = conf["general"]["monitor"].split(":")
+        monitor_data.host, monitor_data.port = conf["general"][
+                "monitor"].split(":")
     except KeyError:
         log.warning("Monitor not defined in General, using %s:%s",
                 monitor_host_default, monitor_port_default)
     except ValueError:
-        monitor_host = conf["general"]["monitor"]
+        monitor_data.host = conf["general"]["monitor"]
 
-    if not monitor_host:
+    if not monitor_data.host:
         log.warning("Empty monitor host, using %s", monitor_host_default)
-        monitor_host = monitor_host_default
-    if not monitor_port:
+        monitor_data.host = monitor_host_default
+    if not monitor_data.port:
         log.info("Empty monitor port, using %s", monitor_port_default)
-        monitor_port = monitor_port_default
+        monitor_data.port = monitor_port_default
 
-    monitor_socket, raw_conf = get_config(log, name, monitor_host,
-            monitor_port)
+    monitor_data.socket, raw_conf = get_config(log, name, monitor_data.host,
+            monitor_data.port)
     remote_conf = {}
     try:
         remote_conf = json.loads(raw_conf)
@@ -270,7 +283,7 @@ def start(conf):
         log.error("Error parsing remote config, config: \n%s\n", raw_conf)
     conf = remote_conf | conf
     log.debug("Merged config: \n%s\n", helpers.to_json(conf))
-    run_loop(log, conf, monitor_host, monitor_port, monitor_socket)
-    if monitor_socket:
-        monitor_socket.shutdown(socket.SHUT_RDWR)
-        monitor_socket.close()
+    run_loop(log, conf, monitor_data)
+    if monitor_data.socket:
+        monitor_data.socket.shutdown(socket.SHUT_RDWR)
+        monitor_data.socket.close()

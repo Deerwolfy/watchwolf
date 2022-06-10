@@ -131,7 +131,8 @@ class ICMP(abc.ABC):
 
     def send(self):
         """Send next ICMP package"""
-        self.create_package()
+        if not self.request.to_be_sent:
+            self.create_package()
         self.elapsed_timer.start()
         if self.request.to_be_sent:
             try:
@@ -316,6 +317,10 @@ class Echo(ICMP):
                 checksum, self.icmp_packet.identifier,
                 self.icmp_packet.sequence, self.data.encode('ascii'))
 
+        log.debug("Sending ICMP:%s %s %s %s %s", self.icmp_packet.type,
+                self.icmp_packet.code, checksum, self.icmp_packet.identifier,
+                self.icmp_packet.sequence)
+
         self.icmp_packet.sequence += 1
         log.debug("Packed icmp %s", icmp_packed)
         self.request.data = self.add_ip_headers(icmp_packed)
@@ -326,6 +331,7 @@ class Echo(ICMP):
         ip_parsed, icmp_packet_raw = self.parse_ip_header(response)
         if icmp_packet_raw:
             icmp_type_raw = bytes([icmp_packet_raw[0]])
+            log.debug("Recieved ICMP type raw: %s", icmp_type_raw)
             try:
                 icmp_type = struct.unpack("!B", icmp_type_raw)[0]
                 if icmp_type != self.reply_icmp_type:
