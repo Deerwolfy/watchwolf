@@ -225,8 +225,8 @@ class ICMP(abc.ABC):
                 'Type Description': type_codes[icmp_unpacked[0]]['name'],
                 'Code Description':  code
             }
-        except (KeyError, IndexError, struct.error):
-            log.warning("Error while parsing ICMP")
+        except (KeyError, IndexError, struct.error) as error:
+            log.warning("Error while parsing ICMP: %s", error)
             icmp_parsed = {}
         log.debug("Parsed response icmp: \n%s\n", helpers.to_json(icmp_parsed))
         return icmp_parsed
@@ -249,7 +249,10 @@ class ICMP(abc.ABC):
 
     def reply_good(self):
         """Check if reply contains good response type"""
+        #try:
         return self.reply_icmp_type == self.response.parsed["icmp"]["Type"]
+        #except KeyError:
+        #    return False
 
     def get_scoket(self):
         """Socket getter"""
@@ -349,8 +352,8 @@ class Echo(ICMP):
                         'Sequence': icmp_unpacked[4],
                         'Data': icmp_unpacked[5].decode('ascii')
                     }
-            except struct.error:
-                log.warning("Errow while parsing ICMP")
+            except struct.error as error:
+                log.warning("Errow while parsing ICMP: %s", error)
                 icmp_parsed = {}
         else:
             log.warning("Response is empty")
@@ -422,8 +425,8 @@ class Timestamp(ICMP):
                         'Receive Timestamp': icmp_unpacked[6],
                         'Transmit Timestamp': icmp_unpacked[7]
                     }
-            except struct.error:
-                log.warning("Error while parsing ICMP")
+            except struct.error as error:
+                log.warning("Error while parsing ICMP: %s", error)
                 icmp_parsed = {}
         else:
             log.warning("Response is empty")
